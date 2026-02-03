@@ -521,11 +521,15 @@ async def worker_admin_login(data: dict):
         return {"success": False, "message": "用户名或密码错误"}
 
     api_key = get_config("app.api_key", "") or ""
+    await api_key_manager.init()
     if not api_key:
-        await api_key_manager.init()
         keys = api_key_manager.get_all_keys()
         if keys:
             api_key = keys[0].get("key", "") or ""
+        else:
+            # 没有可用 Key 时自动生成一个，避免新版 UI 无法维持登录态
+            key_info = await api_key_manager.add_key("admin-auto")
+            api_key = key_info.get("key", "") or ""
 
     return {"success": True, "token": api_key, "message": "登录成功"}
 
