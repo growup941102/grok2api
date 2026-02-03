@@ -245,9 +245,9 @@ class ModelService:
             logger.warning(f"模型清单加载失败，回退内置配置: {e}")
             return cls.DEFAULT_ALIASES, cls._build_models(cls.DEFAULT_MODELS)
 
-    ALIASES, MODELS = _load_model_data()
-
-    _map = {m.model_id: m for m in MODELS}
+    ALIASES: dict = {}
+    MODELS: list[ModelInfo] = []
+    _map: dict = {}
     
     @classmethod
     def get(cls, model_id: str) -> Optional[ModelInfo]:
@@ -289,3 +289,7 @@ class ModelService:
 
 
 __all__ = ["ModelService"]
+
+# 初始化模型清单（避免类体内调用 @classmethod 导致异常）
+ModelService.ALIASES, ModelService.MODELS = ModelService._load_model_data()
+ModelService._map = {m.model_id: m for m in ModelService.MODELS}
