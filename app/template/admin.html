@@ -379,7 +379,7 @@
                 <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
               </svg>
             </button>
-            <button onclick="refreshAllTokens()" class="btn-icon" title="刷新所有Token剩余次数">
+            <button id="refreshAllBtn" onclick="refreshAllTokens()" class="btn-icon" title="刷新所有Token剩余次数">
               <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
                 stroke="currentColor" stroke-width="2">
                 <path d="M21 12a9 9 0 0 0-9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
@@ -418,6 +418,17 @@
               </svg>
               <span class="text-sm font-medium">新增</span>
             </button>
+          </div>
+        </div>
+
+        <div id="refreshProgress" class="hidden border-t border-border px-4 py-2">
+          <div class="flex items-center gap-3">
+            <div class="flex-1">
+              <div class="h-2 rounded bg-muted/60">
+                <div id="refreshProgressBar" class="h-2 rounded bg-primary transition-all" style="width: 0%"></div>
+              </div>
+            </div>
+            <div id="refreshProgressText" class="text-xs text-muted-foreground whitespace-nowrap">-</div>
           </div>
         </div>
 
@@ -1221,7 +1232,12 @@
 
     const showToast = (m, t = 'success') => {
       const d = document.createElement('div');
-      d.className = `fixed top-4 right-4 p-4 rounded-md shadow-lg text-white text-sm z-[9999] transition-all duration-300 transform translate-x-full ${t === 'success' ? 'bg-green-600' : 'bg-red-600'}`;
+      const color = t === 'success'
+        ? 'bg-green-600'
+        : t === 'info'
+          ? 'bg-blue-600'
+          : 'bg-red-600';
+      d.className = `fixed top-4 right-4 p-4 rounded-md shadow-lg text-white text-sm z-[9999] transition-all duration-300 transform translate-x-full ${color}`;
       d.textContent = m;
       document.body.appendChild(d);
       requestAnimationFrame(() => d.classList.remove('translate-x-full'));
@@ -1602,6 +1618,73 @@
     const filterTokens = () => { const tf = $('filterType').value, sf = $('filterStatus').value, tagf = $('filterTag').value; filteredTokens = allTokens.filter(t => (tf === 'all' || t.token_type === tf) && (sf === 'all' || t.status === sf) && (tagf === 'all' || t.tags && t.tags.includes(tagf))); selectedTokens.clear(); renderTokens() };
     const loadAllTags = async () => { try { const r = await apiRequest('/api/tokens/tags/all'); if (!r) return; const d = await r.json(); if (d.success) { allTagsList = d.data; const tagFilter = $('filterTag'); const currentValue = tagFilter.value; tagFilter.innerHTML = '<option value="all">全部标签</option>' + allTagsList.map(tag => `<option value="${tag}">${tag}</option>`).join(''); tagFilter.value = currentValue } } catch (e) { console.error('加载标签列表失败:', e) } };
     const refreshTokens = async () => { await loadTokens(); await loadStats() };
+    let refreshPolling = false;
+    let refreshPollTimer = null;
+    let refreshHideTimer = null;
+
+    const setRefreshUi = (running, current, total, success, failed) => {
+      const wrap = $('refreshProgress');
+      const bar = $('refreshProgressBar');
+      const text = $('refreshProgressText');
+      const btn = $('refreshAllBtn');
+      if (!wrap || !bar || !text) return;
+
+      if (!running && total === 0) {
+        wrap.classList.add('hidden');
+        if (btn) btn.disabled = false;
+        return;
+      }
+
+      wrap.classList.remove('hidden');
+      const pct = total > 0 ? Math.min(100, Math.round((current / total) * 100)) : 0;
+      bar.style.width = `${pct}%`;
+      text.textContent = running
+        ? `刷新中 ${current}/${total} | 成功 ${success} 失败 ${failed}`
+        : `刷新完成 ${current}/${total} | 成功 ${success} 失败 ${failed}`;
+      if (btn) btn.disabled = running;
+    };
+
+    const stopRefreshPolling = () => {
+      refreshPolling = false;
+      if (refreshPollTimer) clearTimeout(refreshPollTimer);
+      refreshPollTimer = null;
+    };
+
+    const startRefreshPolling = async () => {
+      if (refreshPolling) return;
+      refreshPolling = true;
+      if (refreshHideTimer) clearTimeout(refreshHideTimer);
+
+      const poll = async () => {
+        if (!refreshPolling) return;
+        try {
+          const pr = await apiRequest('/api/tokens/refresh-progress');
+          if (!pr) return stopRefreshPolling();
+          const pd = await pr.json();
+          if (pd.success && pd.data) {
+            const { current, total, success, failed, running, status } = pd.data;
+            const isRunning = typeof running === 'boolean' ? running : status === 'running';
+            setRefreshUi(isRunning, current || 0, total || 0, success || 0, failed || 0);
+            if (!isRunning) {
+              stopRefreshPolling();
+              refreshHideTimer = setTimeout(() => {
+                setRefreshUi(false, current || 0, total || 0, success || 0, failed || 0);
+                $('refreshProgress')?.classList.add('hidden');
+              }, 2000);
+              await refreshTokens();
+              return;
+            }
+          }
+        } catch (e) {
+          stopRefreshPolling();
+          return;
+        }
+        refreshPollTimer = setTimeout(poll, 800);
+      };
+
+      await poll();
+    };
+
     const refreshAllTokens = async () => {
       if (!confirm('确定要刷新所有Token的剩余次数吗？这可能需要一段时间...')) return;
 
@@ -1612,6 +1695,7 @@
 
         if (!d.success && d.data?.running) {
           showToast('刷新任务正在进行中，请稍后再试', 'info');
+          startRefreshPolling();
           return;
         }
 
@@ -1620,40 +1704,10 @@
           return;
         }
 
+        const total = d.data?.total || 0;
+        setRefreshUi(true, 0, total, 0, 0);
         showToast('刷新任务已启动...', 'info');
-        await new Promise(resolve => setTimeout(resolve, 300));
-
-        while (true) {
-          await new Promise(resolve => setTimeout(resolve, 500));
-          try {
-            const pr = await apiRequest('/api/tokens/refresh-progress');
-            if (!pr) break;
-            const pd = await pr.json();
-            if (pd.success && pd.data) {
-              const { current, total, success, failed, running, status } = pd.data;
-
-              if (typeof running !== 'boolean') {
-                showToast('刷新完成', 'success');
-                break;
-              }
-
-              if (!running) {
-                showToast(`刷新完成: 成功 ${success} 个, 失败 ${failed} 个`, 'success');
-                break;
-              }
-
-              if (total > 0) {
-                const pct = Math.round((current / total) * 100);
-                showToast(`刷新进度: ${current}/${total} (${pct}%) | 成功: ${success} 失败: ${failed}`, 'info');
-              } else if (status) {
-                showToast('刷新完成', 'success');
-                break;
-              }
-            }
-          } catch (e) { break; }
-        }
-
-        await refreshTokens();
+        startRefreshPolling();
       } catch (e) {
         showToast('刷新失败: ' + e.message, 'error');
       }
@@ -1881,7 +1935,7 @@
     const saveGrokSettings = async () => { const pu = $('cfgProxyUrl').value.trim(), cf = $('cfgCfClearance').value.trim(); const cleanCf = cf.startsWith('cf_clearance=') ? cf.split('cf_clearance=')[1] : cf; const retryCodesStr = $('cfgRetryStatusCodes').value.trim(); const retryCodes = retryCodesStr ? retryCodesStr.split(',').map(c => parseInt(c.trim())).filter(c => !isNaN(c)) : [401, 429]; const maxRetryRaw = parseInt($('cfgMaxRetry').value); const kc = { api_key: $('cfgApiKey').value, proxy_url: pu, proxy_pool_url: $('cfgProxyPoolUrl').value.trim(), proxy_pool_interval: parseInt($('cfgProxyPoolInterval').value) || 300, cache_proxy_url: pu ? $('cfgCacheProxyUrl').value : '', cf_clearance: cleanCf, x_statsig_id: $('cfgStatsigId').value, dynamic_statsig: $('cfgDynamicStatsig').checked, filtered_tags: $('cfgFilteredTags').value, show_thinking: $('cfgShowThinking').value === 'true', temporary: $('cfgTemporary').value === 'true', stream_chunk_timeout: parseInt($('cfgStreamChunkTimeout').value) || 120, stream_first_response_timeout: parseInt($('cfgStreamFirstResponseTimeout').value) || 30, stream_total_timeout: parseInt($('cfgStreamTotalTimeout').value) || 600, max_retry: Number.isFinite(maxRetryRaw) && maxRetryRaw > 0 ? maxRetryRaw : 3, retry_status_codes: retryCodes, retry_on_network_error: $('cfgRetryOnNetwork').value === 'true' }; try { const r = await apiRequest('/api/settings'); if (!r) return; const d = await r.json(); if (!d.success) return showToast('加载配置失败', 'error'); const s = await apiRequest('/api/settings', { method: 'POST', body: JSON.stringify({ global_config: d.data.global, grok_config: kc }) }); if (!s) return; const sd = await s.json(); sd.success ? showToast('Grok配置保存成功', 'success') : showToast('保存失败: ' + (sd.error || '未知错误'), 'error') } catch (e) { showToast('保存失败: ' + e.message, 'error') } };
     const updateHoverCardPosition = c => { const t = c.querySelector('.hover-card-trigger'), ct = c.querySelector('.hover-card-content'); if (!t || !ct) return; const { top, bottom } = t.getBoundingClientRect(), h = window.innerHeight; ct.classList.remove('top', 'bottom'); const { visibility: v, opacity: o } = getComputedStyle(ct); Object.assign(ct.style, { visibility: 'hidden', opacity: '1' }); const ch = ct.offsetHeight; Object.assign(ct.style, { visibility: v, opacity: o }); ct.classList.add(top > ch + 10 ? 'top' : h - bottom > ch + 10 ? 'bottom' : 'top') };
     const loadStorageMode = async () => { const modeConfig = { MYSQL: { classes: ['bg-blue-50', 'text-blue-700', 'border-blue-200'], tooltip: '数据库连接模式 - 数据持久化存储，修改配置时可能稍慢但更安全' }, REDIS: { classes: ['bg-purple-50', 'text-purple-700', 'border-purple-200'], tooltip: 'Redis缓存模式 - 高速内存存储，数据持久化且读写性能极佳' }, FILE: { classes: ['bg-green-50', 'text-green-700', 'border-green-200'], tooltip: '文件存储模式 - 本地文件存储，读写速度快' } }; const applyMode = (mode) => { $('storageModeText').textContent = mode; const config = modeConfig[mode] || modeConfig.FILE; $('storageMode').classList.add(...config.classes); $('storageModeTooltip').textContent = config.tooltip; updateHoverCardPosition($('storageMode').closest('.hover-card')) }; try { const r = await apiRequest('/api/storage/mode'); if (!r) return; const d = await r.json(); d.success && applyMode(d.data.mode) } catch (e) { console.error('加载存储模式失败:', e); applyMode('FILE') } };
-    window.addEventListener('DOMContentLoaded', () => { loadStorageMode(); refreshTokens(); initCacheViewer(); setInterval(() => { loadStats(); updateRemaining() }, 30000); window.addEventListener('resize', () => { const hoverCard = $('storageMode').closest('.hover-card'); hoverCard && updateHoverCardPosition(hoverCard) }); const hoverCard = $('storageMode').closest('.hover-card'), trigger = hoverCard?.querySelector('.hover-card-trigger'), content = hoverCard?.querySelector('.hover-card-content'); if (trigger && content) { trigger.addEventListener('mouseenter', () => { content.style.opacity = '1'; content.style.visibility = 'visible' }); trigger.addEventListener('mouseleave', () => { content.style.opacity = '0'; content.style.visibility = 'hidden' }) }; $('cfgProxyUrl').addEventListener('input', updateCacheProxyReadonly); $('cfgDynamicStatsig').addEventListener('change', updateStatsigIdState) });
+    window.addEventListener('DOMContentLoaded', () => { loadStorageMode(); refreshTokens(); initCacheViewer(); startRefreshPolling(); setInterval(() => { loadStats(); updateRemaining() }, 30000); window.addEventListener('resize', () => { const hoverCard = $('storageMode').closest('.hover-card'); hoverCard && updateHoverCardPosition(hoverCard) }); const hoverCard = $('storageMode').closest('.hover-card'), trigger = hoverCard?.querySelector('.hover-card-trigger'), content = hoverCard?.querySelector('.hover-card-content'); if (trigger && content) { trigger.addEventListener('mouseenter', () => { content.style.opacity = '1'; content.style.visibility = 'visible' }); trigger.addEventListener('mouseleave', () => { content.style.opacity = '0'; content.style.visibility = 'hidden' }) }; $('cfgProxyUrl').addEventListener('input', updateCacheProxyReadonly); $('cfgDynamicStatsig').addEventListener('change', updateStatsigIdState) });
   </script>
 </body>
 
