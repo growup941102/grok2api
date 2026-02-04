@@ -29,6 +29,7 @@ export interface GrokSettings {
   stream_total_timeout?: number;
   max_retry?: number;
   retry_status_codes?: number[];
+  retry_on_network_error?: boolean;
 }
 
 export interface SettingsBundle {
@@ -63,6 +64,7 @@ const DEFAULTS: SettingsBundle = {
     stream_total_timeout: 600,
     max_retry: 3,
     retry_status_codes: [401, 429],
+    retry_on_network_error: true,
   },
 };
 

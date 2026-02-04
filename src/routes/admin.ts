@@ -19,6 +19,7 @@ import {
   deleteTokens,
   getAllTags,
   listTokens,
+  markTokenActive,
   tokenRowToInfo,
   updateTokenNote,
   updateTokenTags,
@@ -77,6 +78,8 @@ async function clearKvCacheByType(
 }
 
 export const adminRoutes = new Hono<{ Bindings: Env }>();
+const RATE_LIMIT_MODEL = "grok-3";
+const REFRESH_STALE_MS = 10 * 60 * 1000;
 
 adminRoutes.post("/api/login", async (c) => {
   try {
@@ -206,11 +209,12 @@ adminRoutes.post("/api/tokens/test", requireAdminAuth, async (c) => {
     const cf = normalizeCfCookie(settings.grok.cf_clearance ?? "");
     const cookie = cf ? `sso-rw=${token};sso=${token};${cf}` : `sso-rw=${token};sso=${token}`;
 
-    const result = await checkRateLimits(cookie, settings.grok, "grok-4-fast");
+    const result = await checkRateLimits(cookie, settings.grok, RATE_LIMIT_MODEL);
     if (result) {
       const remaining = (result as any).remainingTokens ?? -1;
       const limit = (result as any).limit ?? -1;
       await updateTokenLimits(c.env.DB, token, { remaining_queries: typeof remaining === "number" ? remaining : -1 });
+      await markTokenActive(c.env.DB, token);
       return c.json({
         success: true,
         message: "Token有效",
@@ -261,7 +265,12 @@ adminRoutes.post("/api/tokens/refresh-all", requireAdminAuth, async (c) => {
   try {
     const progress = await getRefreshProgress(c.env.DB);
     if (progress.running) {
-      return c.json({ success: false, message: "刷新任务正在进行中", data: progress });
+      const now = Date.now();
+      if (now - progress.updated_at > REFRESH_STALE_MS) {
+        await setRefreshProgress(c.env.DB, { running: false });
+      } else {
+        return c.json({ success: false, message: "刷新任务正在进行中", data: progress });
+      }
     }
 
     const tokens = await listTokens(c.env.DB);
@@ -280,21 +289,25 @@ adminRoutes.post("/api/tokens/refresh-all", requireAdminAuth, async (c) => {
       (async () => {
         let success = 0;
         let failed = 0;
-        for (let i = 0; i < tokens.length; i++) {
-          const t = tokens[i]!;
-          const cookie = cf ? `sso-rw=${t.token};sso=${t.token};${cf}` : `sso-rw=${t.token};sso=${t.token}`;
-          const r = await checkRateLimits(cookie, settings.grok, "grok-4-fast");
-          if (r) {
-            const remaining = (r as any).remainingTokens;
-            if (typeof remaining === "number") await updateTokenLimits(c.env.DB, t.token, { remaining_queries: remaining });
-            success += 1;
-          } else {
-            failed += 1;
+        try {
+          for (let i = 0; i < tokens.length; i++) {
+            const t = tokens[i]!;
+            const cookie = cf ? `sso-rw=${t.token};sso=${t.token};${cf}` : `sso-rw=${t.token};sso=${t.token}`;
+            const r = await checkRateLimits(cookie, settings.grok, RATE_LIMIT_MODEL);
+            if (r) {
+              const remaining = (r as any).remainingTokens;
+              if (typeof remaining === "number") await updateTokenLimits(c.env.DB, t.token, { remaining_queries: remaining });
+              await markTokenActive(c.env.DB, t.token);
+              success += 1;
+            } else {
+              failed += 1;
+            }
+            await setRefreshProgress(c.env.DB, { running: true, current: i + 1, total: tokens.length, success, failed });
+            await new Promise((res) => setTimeout(res, 100));
           }
-          await setRefreshProgress(c.env.DB, { running: true, current: i + 1, total: tokens.length, success, failed });
-          await new Promise((res) => setTimeout(res, 100));
+        } finally {
+          await setRefreshProgress(c.env.DB, { running: false, current: tokens.length, total: tokens.length, success, failed });
         }
-        await setRefreshProgress(c.env.DB, { running: false, current: tokens.length, total: tokens.length, success, failed });
       })(),
     );
 

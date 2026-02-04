@@ -576,6 +576,7 @@ async def worker_get_settings():
         "stream_total_timeout": get_config("grok.stream_total_timeout", 600),
         "max_retry": get_config("grok.max_retry", 3),
         "retry_status_codes": get_config("grok.retry_status_codes", [401, 429, 403]),
+        "retry_on_network_error": get_config("grok.retry_on_network_error", True),
     }
     return {"success": True, "data": {"global": global_cfg, "grok": grok_cfg}}
 
@@ -624,6 +625,7 @@ async def worker_save_settings(data: dict):
             "stream_total_timeout": grok_cfg.get("stream_total_timeout"),
             "max_retry": grok_cfg.get("max_retry"),
             "retry_status_codes": grok_cfg.get("retry_status_codes"),
+            "retry_on_network_error": grok_cfg.get("retry_on_network_error"),
         },
         "app_override": {
             "api_key": grok_cfg.get("api_key"),
@@ -891,6 +893,19 @@ async def worker_test_token(data: dict):
     for pool_name, pool in mgr.pools.items():
         info = pool.get(raw)
         if info:
+            # 先同步额度，成功则更新状态并返回真实剩余
+            synced = await mgr.sync_usage(raw, "grok-3", consume_on_fail=False, is_usage=False)
+            if synced:
+                remaining = int(info.quota)
+                heavy_remaining = remaining if _token_type_from_pool(pool_name) == "ssoSuper" else -1
+                return {
+                    "success": True,
+                    "data": {
+                        "valid": True,
+                        "remaining_queries": remaining,
+                        "heavy_remaining_queries": heavy_remaining,
+                    },
+                }
             status_label = _token_status_label(info.status)
             if status_label == "失效":
                 return {"success": True, "data": {"valid": False, "error_type": "expired"}}
@@ -915,8 +930,28 @@ async def worker_test_token(data: dict):
 async def worker_refresh_all_tokens():
     from app.services.token.manager import get_token_manager
     mgr = await get_token_manager()
-    result = await mgr.refresh_cooling_tokens()
-    return {"success": True, "data": result}
+    # 全量刷新：对所有 token 做 usage 同步
+    tokens = []
+    for pool in mgr.pools.values():
+        tokens.extend(pool.list())
+    if not tokens:
+        return {"success": True, "data": {"checked": 0, "success": 0, "failed": 0}}
+
+    sem = asyncio.Semaphore(10)
+    success = 0
+    failed = 0
+
+    async def _refresh_one(info):
+        nonlocal success, failed
+        async with sem:
+            ok = await mgr.sync_usage(info.token, "grok-3", consume_on_fail=False, is_usage=False)
+            if ok:
+                success += 1
+            else:
+                failed += 1
+
+    await asyncio.gather(*[_refresh_one(t) for t in tokens])
+    return {"success": True, "data": {"checked": len(tokens), "success": success, "failed": failed}}
 
 
 @router.get("/api/tokens/refresh-progress", dependencies=[Depends(verify_api_key)])

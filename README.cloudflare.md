@@ -177,7 +177,7 @@ npx wrangler deploy
 
 ## 8) 接口
 
-- `POST /v1/chat/completions`（支持 `stream: true`）
+- `POST /v1/chat/completions`（支持 `stream: true`，图像模型支持 `n` 生成数量）
 - `GET /v1/models`
 - `GET /images/<img_path>`：从 KV 读缓存，未命中则抓取 `assets.grok.com` 并写入 KV（并在每天 0 点过期/清除）
 - 注意：KV 单条数据有大小限制（建议 ≤ 25MB），且大多数视频播放器会发起 Range 请求；Range 场景会直接代理上游，不一定会命中 KV 缓存。

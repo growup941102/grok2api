@@ -11,6 +11,7 @@ export interface OpenAIChatRequestBody {
   model: string;
   messages: OpenAIChatMessage[];
   stream?: boolean;
+  n?: number;
 }
 
 export const CONVERSATION_API = "https://grok.com/rest/app-chat/conversations/new";
@@ -53,8 +54,9 @@ export function buildConversationPayload(args: {
   imgUris: string[];
   postId?: string;
   settings: GrokSettings;
+  imageCount?: number;
 }): { payload: Record<string, unknown>; referer?: string; isVideoModel: boolean } {
-  const { requestModel, content, imgIds, imgUris, postId, settings } = args;
+  const { requestModel, content, imgIds, imgUris, postId, settings, imageCount } = args;
   const cfg = getModelInfo(requestModel);
   const { grokModel, mode, isVideoModel } = toGrokModel(requestModel);
 
@@ -87,7 +89,7 @@ export function buildConversationPayload(args: {
       returnImageBytes: false,
       returnRawGrokInXaiRequest: false,
       enableImageStreaming: true,
-      imageGenerationCount: 2,
+      imageGenerationCount: Math.max(1, imageCount ?? 1),
       forceConcise: false,
       toolOverrides: {},
       enableSideBySide: true,

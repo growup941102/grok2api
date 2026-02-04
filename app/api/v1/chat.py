@@ -98,6 +98,7 @@ class ChatCompletionRequest(BaseModel):
     messages: List[MessageItem] = Field(..., description="消息数组")
     stream: Optional[bool] = Field(None, description="是否流式输出")
     thinking: Optional[str] = Field(None, description="思考模式: enabled/disabled/None")
+    n: Optional[int] = Field(None, description="生成数量（图像模型有效，默认 1）")
     
     # 视频生成配置
     video_config: Optional[VideoConfig] = Field(None, description="视频生成参数")
@@ -198,6 +199,13 @@ def validate_request(request: ChatCompletionRequest):
                             param=f"messages.{idx}.content.{block_idx}.image_url",
                             code="missing_url"
                         )
+    # 验证 n
+    if request.n is not None and request.n < 1:
+        raise ValidationException(
+            message="n must be a positive integer",
+            param="n",
+            code="invalid_n"
+        )
 
 
 @router.post("/chat/completions")
@@ -230,7 +238,8 @@ async def chat_completions(request: ChatCompletionRequest):
             model=request.model,
             messages=[msg.model_dump() for msg in request.messages],
             stream=request.stream,
-            thinking=request.thinking
+            thinking=request.thinking,
+            n=request.n
         )
     
     if isinstance(result, dict):
