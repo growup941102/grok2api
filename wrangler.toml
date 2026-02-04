@@ -2,6 +2,10 @@ name = "grok2api"
 main = "src/index.ts"
 compatibility_date = "2026-01-28"
 
+routes = [
+  { pattern = "qiyuedeyu.filegear-sg.me/*", zone_name = "filegear-sg.me" }
+]
+
 # Static assets (admin UI)
 assets = { directory = "./app/template", binding = "ASSETS" }
 
