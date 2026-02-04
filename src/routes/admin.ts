@@ -289,24 +289,55 @@ adminRoutes.post("/api/tokens/refresh-all", requireAdminAuth, async (c) => {
       (async () => {
         let success = 0;
         let failed = 0;
-        try {
-          for (let i = 0; i < tokens.length; i++) {
+        let completed = 0;
+        let idx = 0;
+        const concurrency = Math.min(10, tokens.length);
+
+        const runOne = async () => {
+          while (true) {
+            const i = idx;
+            if (i >= tokens.length) return;
+            idx += 1;
             const t = tokens[i]!;
             const cookie = cf ? `sso-rw=${t.token};sso=${t.token};${cf}` : `sso-rw=${t.token};sso=${t.token}`;
-            const r = await checkRateLimits(cookie, settings.grok, RATE_LIMIT_MODEL);
-            if (r) {
-              const remaining = (r as any).remainingTokens;
-              if (typeof remaining === "number") await updateTokenLimits(c.env.DB, t.token, { remaining_queries: remaining });
-              await markTokenActive(c.env.DB, t.token);
-              success += 1;
-            } else {
+            try {
+              const r = await checkRateLimits(cookie, settings.grok, RATE_LIMIT_MODEL);
+              if (r) {
+                const remaining = (r as any).remainingTokens;
+                if (typeof remaining === "number") {
+                  await updateTokenLimits(c.env.DB, t.token, { remaining_queries: remaining });
+                }
+                await markTokenActive(c.env.DB, t.token);
+                success += 1;
+              } else {
+                failed += 1;
+              }
+            } catch {
               failed += 1;
             }
-            await setRefreshProgress(c.env.DB, { running: true, current: i + 1, total: tokens.length, success, failed });
-            await new Promise((res) => setTimeout(res, 100));
+            completed += 1;
+            if (completed % 5 === 0 || completed === tokens.length) {
+              await setRefreshProgress(c.env.DB, {
+                running: true,
+                current: completed,
+                total: tokens.length,
+                success,
+                failed,
+              });
+            }
           }
+        };
+
+        try {
+          await Promise.all(Array.from({ length: concurrency }, runOne));
         } finally {
-          await setRefreshProgress(c.env.DB, { running: false, current: tokens.length, total: tokens.length, success, failed });
+          await setRefreshProgress(c.env.DB, {
+            running: false,
+            current: tokens.length,
+            total: tokens.length,
+            success,
+            failed,
+          });
         }
       })(),
     );
@@ -353,22 +384,45 @@ adminRoutes.post("/api/tokens/refresh-selected", requireAdminAuth, async (c) => 
       (async () => {
         let success = 0;
         let failed = 0;
-        try {
-          for (let i = 0; i < tokens.length; i++) {
+        let completed = 0;
+        let idx = 0;
+        const concurrency = Math.min(10, tokens.length);
+
+        const runOne = async () => {
+          while (true) {
+            const i = idx;
+            if (i >= tokens.length) return;
+            idx += 1;
             const token = tokens[i]!;
             const cookie = cf ? `sso-rw=${token};sso=${token};${cf}` : `sso-rw=${token};sso=${token}`;
-            const r = await checkRateLimits(cookie, settings.grok, RATE_LIMIT_MODEL);
-            if (r) {
-              const remaining = (r as any).remainingTokens;
-              if (typeof remaining === "number") await updateTokenLimits(c.env.DB, token, { remaining_queries: remaining });
-              await markTokenActive(c.env.DB, token);
-              success += 1;
-            } else {
+            try {
+              const r = await checkRateLimits(cookie, settings.grok, RATE_LIMIT_MODEL);
+              if (r) {
+                const remaining = (r as any).remainingTokens;
+                if (typeof remaining === "number") await updateTokenLimits(c.env.DB, token, { remaining_queries: remaining });
+                await markTokenActive(c.env.DB, token);
+                success += 1;
+              } else {
+                failed += 1;
+              }
+            } catch {
               failed += 1;
             }
-            await setRefreshProgress(c.env.DB, { running: true, current: i + 1, total: tokens.length, success, failed });
-            await new Promise((res) => setTimeout(res, 100));
+            completed += 1;
+            if (completed % 5 === 0 || completed === tokens.length) {
+              await setRefreshProgress(c.env.DB, {
+                running: true,
+                current: completed,
+                total: tokens.length,
+                success,
+                failed,
+              });
+            }
           }
+        };
+
+        try {
+          await Promise.all(Array.from({ length: concurrency }, runOne));
         } finally {
           await setRefreshProgress(c.env.DB, {
             running: false,
