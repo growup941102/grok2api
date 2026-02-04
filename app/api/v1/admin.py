@@ -1017,6 +1017,73 @@ async def worker_refresh_all_tokens():
     return {"success": True, "data": {"started": True, "total": len(tokens)}}
 
 
+@router.post("/api/tokens/refresh-selected", dependencies=[Depends(verify_api_key)])
+async def worker_refresh_selected_tokens(data: dict):
+    from app.services.token.manager import get_token_manager
+    state = await _get_refresh_state()
+    if state.get("running"):
+        now = _now_ms()
+        if now - state.get("updated_at", 0) <= REFRESH_STALE_MS:
+            return {"success": False, "message": "刷新任务正在进行中", "data": state}
+        await _set_refresh_state(running=False)
+
+    raw_tokens = data.get("tokens") if isinstance(data, dict) else None
+    if not isinstance(raw_tokens, list):
+        return {"success": False, "message": "未提供 Token 列表"}
+    tokens = [t.strip() for t in raw_tokens if isinstance(t, str) and t.strip()]
+    tokens = list(dict.fromkeys(tokens))
+    if not tokens:
+        return {"success": False, "message": "未提供 Token 列表"}
+
+    await _set_refresh_state(
+        running=True,
+        current=0,
+        total=len(tokens),
+        success=0,
+        failed=0,
+        started_at=_now_ms(),
+    )
+
+    async def _refresh_job():
+        mgr = await get_token_manager()
+        sem = asyncio.Semaphore(10)
+        success = 0
+        failed = 0
+
+        async def _refresh_one(token: str):
+            async with sem:
+                return await mgr.sync_usage(token, "grok-3", consume_on_fail=False, is_usage=False)
+
+        try:
+            tasks = [asyncio.create_task(_refresh_one(t)) for t in tokens]
+            completed = 0
+            for task in asyncio.as_completed(tasks):
+                ok = await task
+                completed += 1
+                if ok:
+                    success += 1
+                else:
+                    failed += 1
+                await _set_refresh_state(
+                    running=True,
+                    current=completed,
+                    total=len(tokens),
+                    success=success,
+                    failed=failed,
+                )
+        finally:
+            await _set_refresh_state(
+                running=False,
+                current=len(tokens),
+                total=len(tokens),
+                success=success,
+                failed=failed,
+            )
+
+    asyncio.create_task(_refresh_job())
+    return {"success": True, "data": {"started": True, "total": len(tokens)}}
+
+
 @router.get("/api/tokens/refresh-progress", dependencies=[Depends(verify_api_key)])
 async def worker_refresh_progress():
     state = await _get_refresh_state()

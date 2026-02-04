@@ -389,6 +389,14 @@
               </svg>
             </button>
             <div id="batchActions" class="hidden items-center gap-2">
+              <button onclick="refreshSelectedTokens()" class="btn-icon" title="刷新选中项">
+                <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2">
+                  <polyline points="23 4 23 10 17 10" />
+                  <polyline points="1 20 1 14 7 14" />
+                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15" />
+                </svg>
+              </button>
               <button onclick="exportSelected()" class="btn-icon" title="导出选中项">
                 <svg class="h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none"
                   stroke="currentColor" stroke-width="2">
@@ -1705,6 +1713,35 @@
         }
 
         const total = d.data?.total || 0;
+        setRefreshUi(true, 0, total, 0, 0);
+        showToast('刷新任务已启动...', 'info');
+        startRefreshPolling();
+      } catch (e) {
+        showToast('刷新失败: ' + e.message, 'error');
+      }
+    };
+    const refreshSelectedTokens = async () => {
+      if (!selectedTokens.size) return showToast('请先选择要刷新的 Token', 'error');
+      if (!confirm(`确定要刷新选中的 ${selectedTokens.size} 个 Token 吗？这可能需要一段时间...`)) return;
+
+      try {
+        const tokens = Array.from(selectedTokens);
+        const r = await apiRequest('/api/tokens/refresh-selected', { method: 'POST', body: JSON.stringify({ tokens }) });
+        if (!r) return;
+        const d = await r.json();
+
+        if (!d.success && d.data?.running) {
+          showToast('刷新任务正在进行中，请稍后再试', 'info');
+          startRefreshPolling();
+          return;
+        }
+
+        if (!d.success) {
+          showToast(d.message || '启动刷新失败', 'error');
+          return;
+        }
+
+        const total = d.data?.total || tokens.length;
         setRefreshUi(true, 0, total, 0, 0);
         showToast('刷新任务已启动...', 'info');
         startRefreshPolling();

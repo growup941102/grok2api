@@ -317,6 +317,79 @@ adminRoutes.post("/api/tokens/refresh-all", requireAdminAuth, async (c) => {
   }
 });
 
+adminRoutes.post("/api/tokens/refresh-selected", requireAdminAuth, async (c) => {
+  try {
+    const progress = await getRefreshProgress(c.env.DB);
+    if (progress.running) {
+      const now = Date.now();
+      if (now - progress.updated_at > REFRESH_STALE_MS) {
+        await setRefreshProgress(c.env.DB, { running: false });
+      } else {
+        return c.json({ success: false, message: "刷新任务正在进行中", data: progress });
+      }
+    }
+
+    const body = (await c.req.json().catch(() => ({}))) as { tokens?: unknown };
+    const tokensInput = Array.isArray(body.tokens) ? body.tokens : [];
+    const tokens = Array.from(
+      new Set(tokensInput.filter((t): t is string => typeof t === "string" && t.trim()).map((t) => t.trim())),
+    );
+    if (!tokens.length) {
+      return c.json({ success: false, message: "未提供 Token 列表" });
+    }
+
+    await setRefreshProgress(c.env.DB, {
+      running: true,
+      current: 0,
+      total: tokens.length,
+      success: 0,
+      failed: 0,
+    });
+
+    const settings = await getSettings(c.env);
+    const cf = normalizeCfCookie(settings.grok.cf_clearance ?? "");
+
+    c.executionCtx.waitUntil(
+      (async () => {
+        let success = 0;
+        let failed = 0;
+        try {
+          for (let i = 0; i < tokens.length; i++) {
+            const token = tokens[i]!;
+            const cookie = cf ? `sso-rw=${token};sso=${token};${cf}` : `sso-rw=${token};sso=${token}`;
+            const r = await checkRateLimits(cookie, settings.grok, RATE_LIMIT_MODEL);
+            if (r) {
+              const remaining = (r as any).remainingTokens;
+              if (typeof remaining === "number") await updateTokenLimits(c.env.DB, token, { remaining_queries: remaining });
+              await markTokenActive(c.env.DB, token);
+              success += 1;
+            } else {
+              failed += 1;
+            }
+            await setRefreshProgress(c.env.DB, { running: true, current: i + 1, total: tokens.length, success, failed });
+            await new Promise((res) => setTimeout(res, 100));
+          }
+        } finally {
+          await setRefreshProgress(c.env.DB, {
+            running: false,
+            current: tokens.length,
+            total: tokens.length,
+            success,
+            failed,
+          });
+        }
+      })(),
+    );
+
+    return c.json({ success: true, message: "刷新任务已启动", data: { started: true, total: tokens.length } });
+  } catch (e) {
+    return c.json(
+      jsonError(`刷新失败: ${e instanceof Error ? e.message : String(e)}`, "REFRESH_SELECTED_ERROR"),
+      500,
+    );
+  }
+});
+
 adminRoutes.get("/api/tokens/refresh-progress", requireAdminAuth, async (c) => {
   try {
     const progress = await getRefreshProgress(c.env.DB);
