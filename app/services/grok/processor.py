@@ -269,7 +269,8 @@ class VideoStreamProcessor(BaseProcessor):
     
     def _build_video_html(self, video_url: str, thumbnail_url: str = "") -> str:
         """构建视频 HTML 标签"""
-        poster_attr = f' poster="{thumbnail_url}"' if thumbnail_url else ""
+        show_poster = get_config("grok.video_poster_preview", False)
+        poster_attr = f' poster="{thumbnail_url}"' if show_poster and thumbnail_url else ""
         return f'''<video id="video" controls="" preload="none"{poster_attr}>
   <source id="mp4" src="{video_url}" type="video/mp4">
 </video>'''
@@ -343,7 +344,8 @@ class VideoCollectProcessor(BaseProcessor):
         self.video_format = get_config("app.video_format", "url")
     
     def _build_video_html(self, video_url: str, thumbnail_url: str = "") -> str:
-        poster_attr = f' poster="{thumbnail_url}"' if thumbnail_url else ""
+        show_poster = get_config("grok.video_poster_preview", False)
+        poster_attr = f' poster="{thumbnail_url}"' if show_poster and thumbnail_url else ""
         return f'''<video id="video" controls="" preload="none"{poster_attr}>
   <source id="mp4" src="{video_url}" type="video/mp4">
 </video>'''
