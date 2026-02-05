@@ -57,7 +57,7 @@ const DEFAULTS: SettingsBundle = {
     cf_clearance: "",
     x_statsig_id: "",
     dynamic_statsig: true,
-    filtered_tags: "xaiartifact,xai:tool_usage_card",
+    filtered_tags: "xaiartifact,xai:tool_usage_card,grok:render",
     show_thinking: true,
     temporary: false,
     video_poster_preview: false,

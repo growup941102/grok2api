@@ -3,6 +3,7 @@ OpenAI 响应格式处理器
 """
 import time
 import uuid
+import re
 import random
 import orjson
 from typing import Any, AsyncGenerator, Optional, AsyncIterable, List
@@ -79,6 +80,17 @@ class BaseProcessor:
         return f"data: {orjson.dumps(chunk).decode()}\n\n"
 
 
+RENDER_OPEN_TAG = "<grok:render"
+RENDER_CLOSE_TAG = "</grok:render>"
+RENDER_BLOCK_RE = re.compile(r"<grok:render[\\s\\S]*?</grok:render>")
+
+
+def _strip_render_tags(text: str) -> str:
+    if not text:
+        return text
+    return RENDER_BLOCK_RE.sub("", text)
+
+
 class StreamProcessor(BaseProcessor):
     """流式响应处理器"""
     
@@ -88,6 +100,7 @@ class StreamProcessor(BaseProcessor):
         self.fingerprint: str = ""
         self.think_opened: bool = False
         self.role_sent: bool = False
+        self._render_open: bool = False
         self.filter_tags = get_config("grok.filter_tags", [])
         self.image_format = get_config("app.image_format", "url")
         
@@ -162,7 +175,12 @@ class StreamProcessor(BaseProcessor):
                 
                 # 普通 token
                 if (token := resp.get("token")) is not None:
-                    if token and not (self.filter_tags and any(t in token for t in self.filter_tags)):
+                    if isinstance(token, str):
+                        token = self._strip_render_stream(token)
+                        if not token:
+                            continue
+                        if self.filter_tags and any(t in token for t in self.filter_tags):
+                            continue
                         yield self._sse(token)
                         
             if self.think_opened:
@@ -174,6 +192,35 @@ class StreamProcessor(BaseProcessor):
             raise
         finally:
             await self.close()
+
+    def _strip_render_stream(self, text: str) -> str:
+        if not text:
+            return text
+        out: list[str] = []
+        rest = text
+        while rest:
+            if self._render_open:
+                end = rest.find(RENDER_CLOSE_TAG)
+                if end == -1:
+                    return "".join(out)
+                rest = rest[end + len(RENDER_CLOSE_TAG):]
+                self._render_open = False
+                continue
+
+            start = rest.find(RENDER_OPEN_TAG)
+            if start == -1:
+                out.append(rest)
+                break
+            out.append(rest[:start])
+            rest = rest[start:]
+
+            end = rest.find(RENDER_CLOSE_TAG)
+            if end == -1:
+                self._render_open = True
+                break
+            rest = rest[end + len(RENDER_CLOSE_TAG):]
+
+        return "".join(out)
 
 
 class CollectProcessor(BaseProcessor):
@@ -205,7 +252,7 @@ class CollectProcessor(BaseProcessor):
                 
                 if mr := resp.get("modelResponse"):
                     response_id = mr.get("responseId", "")
-                    content = mr.get("message", "")
+                    content = _strip_render_tags(mr.get("message", ""))
                     
                     if urls := mr.get("generatedImageUrls"):
                         content += "\n"

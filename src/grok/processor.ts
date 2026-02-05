@@ -53,6 +53,49 @@ function buildVideoTag(src: string): string {
   return `<video src="${src}" controls="controls" width="500" height="300"></video>\n`;
 }
 
+const RENDER_OPEN_TAG = "<grok:render";
+const RENDER_CLOSE_TAG = "</grok:render>";
+
+function createRenderTagStripper(): (input: string) => string {
+  let inRenderTag = false;
+  return (input: string) => {
+    if (!input) return input;
+    let text = input;
+    let out = "";
+
+    while (text.length) {
+      if (inRenderTag) {
+        const endIdx = text.indexOf(RENDER_CLOSE_TAG);
+        if (endIdx === -1) return out;
+        text = text.slice(endIdx + RENDER_CLOSE_TAG.length);
+        inRenderTag = false;
+        continue;
+      }
+
+      const startIdx = text.indexOf(RENDER_OPEN_TAG);
+      if (startIdx === -1) {
+        out += text;
+        break;
+      }
+      out += text.slice(0, startIdx);
+      text = text.slice(startIdx);
+
+      const endIdx = text.indexOf(RENDER_CLOSE_TAG);
+      if (endIdx === -1) {
+        inRenderTag = true;
+        break;
+      }
+      text = text.slice(endIdx + RENDER_CLOSE_TAG.length);
+    }
+
+    return out;
+  };
+}
+
+function stripRenderTags(input: string): string {
+  return input.replace(/<grok:render[\s\S]*?<\/grok:render>/g, "");
+}
+
 function buildVideoPosterPreview(videoUrl: string, posterUrl?: string): string {
   const href = String(videoUrl || "").replace(/"/g, "&quot;");
   const poster = String(posterUrl || "").replace(/"/g, "&quot;");
@@ -136,6 +179,7 @@ export function createOpenAiStreamFromGrokNdjson(
     .map((t) => t.trim())
     .filter(Boolean);
   const showThinking = settings.show_thinking !== false;
+  const stripRenderStream = createRenderTagStripper();
 
   const firstTimeoutMs = Math.max(0, (settings.stream_first_response_timeout ?? 30) * 1000);
   const chunkTimeoutMs = Math.max(0, (settings.stream_chunk_timeout ?? 120) * 1000);
@@ -330,7 +374,8 @@ export function createOpenAiStreamFromGrokNdjson(
             // Text chat stream
             if (Array.isArray(rawToken)) continue;
             if (typeof rawToken !== "string" || !rawToken) continue;
-            let token = rawToken;
+            let token = stripRenderStream(rawToken);
+            if (!token) continue;
 
             if (filteredTags.some((t) => token.includes(t))) continue;
 
@@ -451,7 +496,7 @@ export async function parseOpenAiFromGrokNdjson(
     if (typeof modelResp.error === "string" && modelResp.error) throw new Error(modelResp.error);
 
     if (typeof modelResp.model === "string" && modelResp.model) model = modelResp.model;
-    if (typeof modelResp.message === "string") content = modelResp.message;
+    if (typeof modelResp.message === "string") content = stripRenderTags(modelResp.message);
 
     const rawUrls = modelResp.generatedImageUrls;
     const urls = normalizeGeneratedAssetUrls(rawUrls);
