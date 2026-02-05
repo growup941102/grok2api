@@ -11,6 +11,7 @@ export interface ModelInfo {
   supported_max_output_tokens: number;
   default_top_p: number;
   is_video_model?: boolean;
+  is_image_model?: boolean;
 }
 
 type SharedModel = {
@@ -26,6 +27,7 @@ type SharedModel = {
   supported_max_output_tokens?: number;
   default_top_p?: number;
   is_video?: boolean;
+  is_image?: boolean;
 };
 
 const shared = modelData as { aliases?: Record<string, string>; models?: SharedModel[] };
@@ -45,6 +47,7 @@ for (const item of shared.models ?? []) {
     supported_max_output_tokens: item.supported_max_output_tokens ?? 131072,
     default_top_p: item.default_top_p ?? 0.95,
     is_video_model: Boolean(item.is_video),
+    is_image_model: Boolean(item.is_image),
   };
 }
 

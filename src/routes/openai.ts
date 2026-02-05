@@ -6,7 +6,7 @@ import { getSettings, normalizeCfCookie } from "../settings";
 import { isValidModel, MODEL_CONFIG } from "../grok/models";
 import { extractContent, buildConversationPayload, sendConversationRequest } from "../grok/conversation";
 import { uploadImage } from "../grok/upload";
-import { createPost } from "../grok/create";
+import { createMediaPost, createPost } from "../grok/create";
 import { createOpenAiStreamFromGrokNdjson, parseOpenAiFromGrokNdjson } from "../grok/processor";
 import { addRequestLog } from "../repo/logs";
 import { applyCooldown, recordTokenFailure, selectBestToken } from "../repo/tokens";
@@ -22,6 +22,31 @@ function getClientIp(req: Request): string {
     req.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ||
     "0.0.0.0"
   );
+}
+
+function isNetworkError(err: unknown): boolean {
+  if (!err) return false;
+  const msg = err instanceof Error ? err.message : String(err);
+  if (!msg) return false;
+  const normalized = msg.toLowerCase();
+  const keywords = [
+    "connection reset",
+    "recv failure",
+    "connection refused",
+    "connection closed",
+    "connection error",
+    "econnreset",
+    "econnrefused",
+    "etimedout",
+    "timeout",
+    "timed out",
+    "network is unreachable",
+    "fetch failed",
+    "tls",
+    "ssl",
+    "eof",
+  ];
+  return keywords.some((k) => normalized.includes(k));
 }
 
 async function mapLimit<T, R>(
@@ -106,6 +131,13 @@ openAiRoutes.post("/chat/completions", async (c) => {
       model?: string;
       messages?: any[];
       stream?: boolean;
+      n?: number;
+      video_config?: {
+        aspect_ratio?: string;
+        video_length?: number;
+        resolution?: string;
+        preset?: string;
+      };
     };
 
     requestedModel = String(body.model ?? "");
@@ -121,7 +153,16 @@ openAiRoutes.post("/chat/completions", async (c) => {
       : [401, 429];
 
     const stream = Boolean(body.stream);
+    const nRaw = body.n;
+    if (nRaw !== undefined) {
+      const parsed = Number(nRaw);
+      if (!Number.isFinite(parsed) || parsed < 1) {
+        return c.json(openAiError("Invalid 'n', must be a positive integer", "invalid_n"), 400);
+      }
+    }
+    const imageCount = Math.max(1, Number(body.n ?? 1) || 1);
     const maxRetry = Math.max(1, Number(settingsBundle.grok.max_retry ?? 3) || 3);
+    const retryOnNetworkError = settingsBundle.grok.retry_on_network_error !== false;
     let lastErr: string | null = null;
 
     for (let attempt = 0; attempt < maxRetry; attempt++) {
@@ -136,6 +177,13 @@ openAiRoutes.post("/chat/completions", async (c) => {
       const cfg = MODEL_CONFIG[requestedModel]!;
       const isVideoModel = Boolean(cfg.is_video_model);
       const imgInputs = isVideoModel && images.length > 1 ? images.slice(0, 1) : images;
+      let normalizedContent = content;
+      if (cfg.is_image_model) {
+        const trimmed = normalizedContent.trim();
+        if (trimmed && !trimmed.toLowerCase().startsWith("image generation:")) {
+          normalizedContent = `Image Generation:${normalizedContent}`;
+        }
+      }
 
       try {
         const uploads = await mapLimit(imgInputs, 5, (u) => uploadImage(u, cookie, settingsBundle.grok));
@@ -143,18 +191,29 @@ openAiRoutes.post("/chat/completions", async (c) => {
         const imgUris = uploads.map((u) => u.fileUri).filter(Boolean);
 
         let postId: string | undefined;
-        if (isVideoModel && imgUris.length) {
-          const post = await createPost(imgUris[0]!, cookie, settingsBundle.grok);
-          postId = post.postId || undefined;
+        if (isVideoModel) {
+          if (imgUris.length) {
+            const post = await createPost(imgUris[0]!, cookie, settingsBundle.grok);
+            postId = post.postId || undefined;
+          } else {
+            const post = await createMediaPost(
+              { mediaType: "MEDIA_POST_TYPE_VIDEO", prompt: normalizedContent },
+              cookie,
+              settingsBundle.grok,
+            );
+            postId = post.postId || undefined;
+          }
         }
 
         const { payload, referer } = buildConversationPayload({
           requestModel: requestedModel,
-          content,
+          content: normalizedContent,
           imgIds,
           imgUris,
           ...(postId ? { postId } : {}),
+          ...(isVideoModel && body.video_config ? { videoConfig: body.video_config } : {}),
           settings: settingsBundle.grok,
+          imageCount,
         });
 
         const upstream = await sendConversationRequest({
@@ -229,7 +288,8 @@ openAiRoutes.post("/chat/completions", async (c) => {
         lastErr = msg;
         await recordTokenFailure(c.env.DB, jwt, 500, msg);
         await applyCooldown(c.env.DB, jwt, 500);
-        if (attempt < maxRetry - 1) continue;
+        if (retryOnNetworkError && isNetworkError(e) && attempt < maxRetry - 1) continue;
+        break;
       }
     }
 

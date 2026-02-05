@@ -117,6 +117,7 @@ curl http://localhost:8000/v1/chat/completions \
 | `messages`         | array   | 消息列表                       | `developer`, `system`, `user`, `assistant` |
 | `stream`           | boolean | 是否开启流式输出               | `true`, `false`                                |
 | `thinking`         | string  | 思维链模式                     | `enabled`, `disabled`, `null`                |
+| `n`               | number  | 生成数量（图像模型有效）       | 正整数，默认 `1`                                 |
 | `video_config`     | object  | **视频模型专用配置对象** | -                                                  |
 | └─`aspect_ratio` | string  | 视频宽高比                     | `16:9`, `9:16`, `1:1`, `2:3`, `3:2`      |
 | └─`video_length` | integer | 视频时长 (秒)                  | `5` - `15`                                     |

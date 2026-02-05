@@ -37,6 +37,7 @@ class ChatRequest:
     messages: List[Dict[str, Any]]
     stream: bool = None
     think: bool = None
+    n: int | None = None
 
 
 class MessageExtractor:
@@ -193,7 +194,8 @@ class ChatRequestBuilder:
         mode: str, 
         think: bool = None,
         file_attachments: List[str] = None,
-        image_attachments: List[str] = None
+        image_attachments: List[str] = None,
+        image_count: int = 1
     ) -> Dict[str, Any]:
         """
         构造请求体
@@ -222,7 +224,7 @@ class ChatRequestBuilder:
             "returnImageBytes": False,
             "returnRawGrokInXaiRequest": False,
             "enableImageStreaming": True,
-            "imageGenerationCount": 2,
+            "imageGenerationCount": image_count,
             "forceConcise": False,
             "toolOverrides": {},
             "enableSideBySide": True,
@@ -265,7 +267,8 @@ class GrokChatService:
         think: bool = None,
         stream: bool = None,
         file_attachments: List[str] = None,
-        image_attachments: List[str] = None
+        image_attachments: List[str] = None,
+        image_count: int = 1
     ):
         """
         发送聊天请求
@@ -289,7 +292,7 @@ class GrokChatService:
         headers = ChatRequestBuilder.build_headers(token)
         payload = ChatRequestBuilder.build_payload(
             message, model, mode, think, 
-            file_attachments, image_attachments
+            file_attachments, image_attachments, image_count
         )
         proxies = {"http": self.proxy, "https": self.proxy} if self.proxy else None
         timeout = get_config("grok.timeout", TIMEOUT)
@@ -401,6 +404,7 @@ class GrokChatService:
             normalized = message.strip()
             if not normalized.lower().startswith("image generation:"):
                 message = f"Image Generation:{message}"
+        image_count = request.n if request.n and request.n > 0 else 1
         
         # 处理附件上传
         file_ids = []
@@ -430,7 +434,8 @@ class GrokChatService:
         response = await self.chat(
             token, message, grok_model, mode, think, stream,
             file_attachments=file_ids,
-            image_attachments=image_ids
+            image_attachments=image_ids,
+            image_count=image_count
         )
         
         return response, stream, request.model
@@ -446,7 +451,8 @@ class ChatService:
         model: str,
         messages: List[Dict[str, Any]],
         stream: bool = None,
-        thinking: str = None
+        thinking: str = None,
+        n: int | None = None
     ):
         """
         Chat Completions 入口
@@ -496,7 +502,8 @@ class ChatService:
             model=model,
             messages=messages,
             stream=is_stream,
-            think=think
+            think=think,
+            n=n
         )
         
         # 请求 Grok

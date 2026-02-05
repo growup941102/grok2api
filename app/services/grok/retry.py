@@ -29,6 +29,31 @@ class RetryConfig:
         """获取可重试的状态码"""
         return get_config("grok.retry_status_codes", [401, 429, 403])
 
+    @staticmethod
+    def get_retry_on_network_error() -> bool:
+        """是否对网络异常重试"""
+        return bool(get_config("grok.retry_on_network_error", True))
+
+    @staticmethod
+    def get_network_error_keywords() -> List[str]:
+        """网络异常关键字（用于判定是否重试）"""
+        return [
+            "connection reset",
+            "recv failure",
+            "connection aborted",
+            "connection refused",
+            "connection closed",
+            "connection error",
+            "timed out",
+            "timeout",
+            "network is unreachable",
+            "broken pipe",
+            "tls",
+            "ssl",
+            "eof",
+            "curl",
+        ]
+
 
 class RetryContext:
     """重试上下文"""
@@ -52,6 +77,25 @@ class RetryContext:
         self.last_status = status_code
         self.last_error = error
         self.attempt += 1
+
+
+def _get_error_message(e: Exception) -> str:
+    if isinstance(e, UpstreamException):
+        details = e.details or {}
+        raw = details.get("error")
+        if isinstance(raw, str) and raw:
+            return raw
+    return str(e)
+
+
+def _is_network_error(e: Exception) -> bool:
+    # 直接异常类型
+    if isinstance(e, (asyncio.TimeoutError, ConnectionError, OSError)):
+        return True
+    msg = _get_error_message(e).lower()
+    if not msg:
+        return False
+    return any(k in msg for k in RetryConfig.get_network_error_keywords())
 
 
 async def retry_on_status(
@@ -103,8 +147,22 @@ async def retry_on_status(
             status_code = extract_status(e)
             
             if status_code is None:
-                # 错误无法识别
-                logger.error(f"Non-retryable error: {e}")
+                # 无状态码，尝试判定是否为网络错误
+                if RetryConfig.get_retry_on_network_error() and _is_network_error(e):
+                    ctx.record_error(0, e)
+                    if ctx.attempt <= ctx.max_retry:
+                        delay = 0.5 * (ctx.attempt + 1)
+                        logger.warning(
+                            f"Retry {ctx.attempt}/{ctx.max_retry} for network error, "
+                            f"waiting {delay}s"
+                        )
+                        if on_retry:
+                            on_retry(ctx.attempt, 0, e)
+                        await asyncio.sleep(delay)
+                        continue
+                    logger.error(f"Retry exhausted after {ctx.max_retry} attempts (network error)")
+                else:
+                    logger.error(f"Non-retryable error: {e}")
                 raise
             
             # 记录错误

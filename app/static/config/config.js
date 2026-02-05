@@ -36,7 +36,8 @@ const LOCALE_MAP = {
     "asset_proxy_url": { title: "资源代理 URL", desc: "代理请求到 Grok 官网的静态资源（图片/视频）地址。" },
     "cf_clearance": { title: "CF Clearance", desc: "Cloudflare 验证 Cookie，用于验证 Cloudflare 的验证。" },
     "max_retry": { title: "最大重试", desc: "请求 Grok 服务失败时的最大重试次数。" },
-    "retry_status_codes": { title: "重试状态码", desc: "触发重试的 HTTP 状态码列表。" }
+    "retry_status_codes": { title: "重试状态码", desc: "触发重试的 HTTP 状态码列表。" },
+    "retry_on_network_error": { title: "网络错误重试", desc: "遇到连接重置、超时、TLS 失败等网络错误时是否重试。" }
   },
   "token": {
     "label": "Token 池设置",

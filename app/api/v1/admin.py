@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from app.core.auth import verify_api_key, verify_app_key
 from app.core.config import config, get_config
 from app.core.storage import get_storage, LocalStorage, RedisStorage, SQLStorage
@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import aiofiles
 import asyncio
+import time
 from app.core.logger import logger
 from app.services.api_keys import api_key_manager
 from app.services.request_logger import request_logger
@@ -17,6 +18,30 @@ router = APIRouter()
 
 TEMPLATE_DIR = Path(__file__).parent.parent.parent / "static"
 ADMIN_TEMPLATE_DIR = Path(__file__).parent.parent.parent / "template"
+
+REFRESH_STALE_MS = 10 * 60 * 1000
+_REFRESH_LOCK = asyncio.Lock()
+_REFRESH_STATE = {
+    "running": False,
+    "current": 0,
+    "total": 0,
+    "success": 0,
+    "failed": 0,
+    "updated_at": 0,
+    "started_at": 0,
+}
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+async def _get_refresh_state() -> dict:
+    async with _REFRESH_LOCK:
+        return dict(_REFRESH_STATE)
+
+async def _set_refresh_state(**kwargs):
+    async with _REFRESH_LOCK:
+        _REFRESH_STATE.update(kwargs)
+        _REFRESH_STATE["updated_at"] = _now_ms()
 
 async def render_template(filename: str):
     """渲染旧版管理后台模板"""
@@ -253,22 +278,22 @@ async def admin_cache_page():
 @router.get("/admin-legacy", response_class=HTMLResponse, include_in_schema=False)
 async def admin_legacy_login_page():
     """旧版管理后台登录页"""
-    return await render_template("login/login.html")
+    return RedirectResponse(url="/manage", status_code=302)
 
 @router.get("/admin-legacy/config", response_class=HTMLResponse, include_in_schema=False)
 async def admin_legacy_config_page():
     """旧版配置管理页"""
-    return await render_template("config/config.html")
+    return RedirectResponse(url="/manage", status_code=302)
 
 @router.get("/admin-legacy/token", response_class=HTMLResponse, include_in_schema=False)
 async def admin_legacy_token_page():
     """旧版 Token 管理页"""
-    return await render_template("token/token.html")
+    return RedirectResponse(url="/manage", status_code=302)
 
 @router.get("/admin-legacy/cache", response_class=HTMLResponse, include_in_schema=False)
 async def admin_legacy_cache_page():
     """旧版缓存管理页"""
-    return await render_template("cache/cache.html")
+    return RedirectResponse(url="/manage", status_code=302)
 
 @router.get("/api/v1/admin/cache", dependencies=[Depends(verify_api_key)])
 async def get_cache_stats_api(request: Request):
@@ -571,11 +596,13 @@ async def worker_get_settings():
         "filtered_tags": _to_str_list(get_config("grok.filter_tags", "")),
         "show_thinking": get_config("grok.thinking", True),
         "temporary": get_config("grok.temporary", True),
+        "video_poster_preview": get_config("grok.video_poster_preview", False),
         "stream_chunk_timeout": get_config("grok.stream_chunk_timeout", 120),
         "stream_first_response_timeout": get_config("grok.stream_first_response_timeout", 30),
         "stream_total_timeout": get_config("grok.stream_total_timeout", 600),
         "max_retry": get_config("grok.max_retry", 3),
         "retry_status_codes": get_config("grok.retry_status_codes", [401, 429, 403]),
+        "retry_on_network_error": get_config("grok.retry_on_network_error", True),
     }
     return {"success": True, "data": {"global": global_cfg, "grok": grok_cfg}}
 
@@ -619,11 +646,13 @@ async def worker_save_settings(data: dict):
             "filter_tags": _split_tags(grok_cfg.get("filtered_tags")),
             "thinking": grok_cfg.get("show_thinking"),
             "temporary": grok_cfg.get("temporary"),
+            "video_poster_preview": grok_cfg.get("video_poster_preview"),
             "stream_chunk_timeout": grok_cfg.get("stream_chunk_timeout"),
             "stream_first_response_timeout": grok_cfg.get("stream_first_response_timeout"),
             "stream_total_timeout": grok_cfg.get("stream_total_timeout"),
             "max_retry": grok_cfg.get("max_retry"),
             "retry_status_codes": grok_cfg.get("retry_status_codes"),
+            "retry_on_network_error": grok_cfg.get("retry_on_network_error"),
         },
         "app_override": {
             "api_key": grok_cfg.get("api_key"),
@@ -891,6 +920,19 @@ async def worker_test_token(data: dict):
     for pool_name, pool in mgr.pools.items():
         info = pool.get(raw)
         if info:
+            # 先同步额度，成功则更新状态并返回真实剩余
+            synced = await mgr.sync_usage(raw, "grok-3", consume_on_fail=False, is_usage=False)
+            if synced:
+                remaining = int(info.quota)
+                heavy_remaining = remaining if _token_type_from_pool(pool_name) == "ssoSuper" else -1
+                return {
+                    "success": True,
+                    "data": {
+                        "valid": True,
+                        "remaining_queries": remaining,
+                        "heavy_remaining_queries": heavy_remaining,
+                    },
+                }
             status_label = _token_status_label(info.status)
             if status_label == "失效":
                 return {"success": True, "data": {"valid": False, "error_type": "expired"}}
@@ -914,14 +956,142 @@ async def worker_test_token(data: dict):
 @router.post("/api/tokens/refresh-all", dependencies=[Depends(verify_api_key)])
 async def worker_refresh_all_tokens():
     from app.services.token.manager import get_token_manager
+    state = await _get_refresh_state()
+    if state.get("running"):
+        now = _now_ms()
+        if now - state.get("updated_at", 0) <= REFRESH_STALE_MS:
+            return {"success": False, "message": "刷新任务正在进行中", "data": state}
+        await _set_refresh_state(running=False)
+
     mgr = await get_token_manager()
-    result = await mgr.refresh_cooling_tokens()
-    return {"success": True, "data": result}
+    tokens = []
+    for pool in mgr.pools.values():
+        tokens.extend([t.token for t in pool.list()])
+    if not tokens:
+        await _set_refresh_state(running=False, current=0, total=0, success=0, failed=0)
+        return {"success": True, "data": {"checked": 0, "success": 0, "failed": 0}}
+
+    await _set_refresh_state(
+        running=True,
+        current=0,
+        total=len(tokens),
+        success=0,
+        failed=0,
+        started_at=_now_ms(),
+    )
+
+    async def _refresh_job():
+        sem = asyncio.Semaphore(10)
+        success = 0
+        failed = 0
+
+        async def _refresh_one(token: str):
+            async with sem:
+                return await mgr.sync_usage(token, "grok-3", consume_on_fail=False, is_usage=False)
+
+        try:
+            tasks = [asyncio.create_task(_refresh_one(t)) for t in tokens]
+            completed = 0
+            for task in asyncio.as_completed(tasks):
+                ok = await task
+                completed += 1
+                if ok:
+                    success += 1
+                else:
+                    failed += 1
+                await _set_refresh_state(
+                    running=True,
+                    current=completed,
+                    total=len(tokens),
+                    success=success,
+                    failed=failed,
+                )
+        finally:
+            await _set_refresh_state(
+                running=False,
+                current=len(tokens),
+                total=len(tokens),
+                success=success,
+                failed=failed,
+            )
+
+    asyncio.create_task(_refresh_job())
+    return {"success": True, "data": {"started": True, "total": len(tokens)}}
+
+
+@router.post("/api/tokens/refresh-selected", dependencies=[Depends(verify_api_key)])
+async def worker_refresh_selected_tokens(data: dict):
+    from app.services.token.manager import get_token_manager
+    state = await _get_refresh_state()
+    if state.get("running"):
+        now = _now_ms()
+        if now - state.get("updated_at", 0) <= REFRESH_STALE_MS:
+            return {"success": False, "message": "刷新任务正在进行中", "data": state}
+        await _set_refresh_state(running=False)
+
+    raw_tokens = data.get("tokens") if isinstance(data, dict) else None
+    if not isinstance(raw_tokens, list):
+        return {"success": False, "message": "未提供 Token 列表"}
+    tokens = [t.strip() for t in raw_tokens if isinstance(t, str) and t.strip()]
+    tokens = list(dict.fromkeys(tokens))
+    if not tokens:
+        return {"success": False, "message": "未提供 Token 列表"}
+
+    await _set_refresh_state(
+        running=True,
+        current=0,
+        total=len(tokens),
+        success=0,
+        failed=0,
+        started_at=_now_ms(),
+    )
+
+    async def _refresh_job():
+        mgr = await get_token_manager()
+        sem = asyncio.Semaphore(10)
+        success = 0
+        failed = 0
+
+        async def _refresh_one(token: str):
+            async with sem:
+                return await mgr.sync_usage(token, "grok-3", consume_on_fail=False, is_usage=False)
+
+        try:
+            tasks = [asyncio.create_task(_refresh_one(t)) for t in tokens]
+            completed = 0
+            for task in asyncio.as_completed(tasks):
+                ok = await task
+                completed += 1
+                if ok:
+                    success += 1
+                else:
+                    failed += 1
+                await _set_refresh_state(
+                    running=True,
+                    current=completed,
+                    total=len(tokens),
+                    success=success,
+                    failed=failed,
+                )
+        finally:
+            await _set_refresh_state(
+                running=False,
+                current=len(tokens),
+                total=len(tokens),
+                success=success,
+                failed=failed,
+            )
+
+    asyncio.create_task(_refresh_job())
+    return {"success": True, "data": {"started": True, "total": len(tokens)}}
 
 
 @router.get("/api/tokens/refresh-progress", dependencies=[Depends(verify_api_key)])
 async def worker_refresh_progress():
-    return {"success": True, "data": {"status": "idle"}}
+    state = await _get_refresh_state()
+    if not state.get("running") and state.get("total", 0) == 0:
+        return {"success": True, "data": {"status": "idle"}}
+    return {"success": True, "data": state}
 
 
 @router.get("/api/cache/size", dependencies=[Depends(verify_api_key)])

@@ -96,6 +96,14 @@ export async function listTokens(db: Env["DB"]): Promise<TokenRow[]> {
   );
 }
 
+export async function markTokenActive(db: Env["DB"], token: string): Promise<void> {
+  await dbRun(
+    db,
+    "UPDATE tokens SET status='active', failed_count=0, cooldown_until=NULL, last_failure_time=NULL, last_failure_reason=NULL WHERE token = ?",
+    [token],
+  );
+}
+
 export async function addTokens(db: Env["DB"], tokens: string[], token_type: TokenType): Promise<number> {
   const now = nowMs();
   const cleaned = tokens.map((t) => t.trim()).filter(Boolean);

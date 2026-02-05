@@ -24,11 +24,13 @@ export interface GrokSettings {
   filtered_tags?: string;
   show_thinking?: boolean;
   temporary?: boolean;
+  video_poster_preview?: boolean;
   stream_first_response_timeout?: number;
   stream_chunk_timeout?: number;
   stream_total_timeout?: number;
   max_retry?: number;
   retry_status_codes?: number[];
+  retry_on_network_error?: boolean;
 }
 
 export interface SettingsBundle {
@@ -58,11 +60,13 @@ const DEFAULTS: SettingsBundle = {
     filtered_tags: "xaiartifact,xai:tool_usage_card",
     show_thinking: true,
     temporary: false,
+    video_poster_preview: false,
     stream_first_response_timeout: 30,
     stream_chunk_timeout: 120,
     stream_total_timeout: 600,
     max_retry: 3,
     retry_status_codes: [401, 429],
+    retry_on_network_error: true,
   },
 };
 

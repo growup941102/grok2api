@@ -126,7 +126,7 @@
       "id": "grok-4-heavy",
       "grok_model": "grok-4",
       "model_mode": "MODEL_MODE_HEAVY",
-      "rate_limit_model": "grok-4",
+      "rate_limit_model": "grok-4-heavy",
       "display_name": "Grok 4 Heavy",
       "description": "Most powerful Grok model. Requires Super Token for access.",
       "raw_model_path": "xai/grok-4",
